@@ -91,7 +91,7 @@ def run_analysis():
             messages=[{"role": "user", "content": USER_MESSAGE}]
         )
 
-        text_blocks = [b.text for b in response.content if hasattr(b, "text")]
+        text_blocks = [b.text for b in response.content if hasattr(b, "text") and b.text is not None]
         raw_text = "\n".join(text_blocks)
 
         match = re.search(r"\{[\s\S]*\}", raw_text)
