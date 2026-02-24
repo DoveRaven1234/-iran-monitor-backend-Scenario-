@@ -1,4 +1,3 @@
-
 import os
 import json
 import time
@@ -10,7 +9,6 @@ import anthropic
 from flask import Flask, jsonify
 from flask_cors import CORS
 
-# ── Setup ──────────────────────────────────────────────────────────────────────
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
 
@@ -19,7 +17,6 @@ CORS(app)
 
 REFRESH_INTERVAL_HOURS = int(os.environ.get("REFRESH_INTERVAL_HOURS", "4"))
 
-# ── In-memory cache ────────────────────────────────────────────────────────────
 cache = {
     "data": None,
     "last_updated": None,
@@ -28,66 +25,64 @@ cache = {
     "error": None,
 }
 
-# ── Prompt ─────────────────────────────────────────────────────────────────────
 SYSTEM_PROMPT = """You are a geopolitical intelligence analyst specializing in Middle East affairs.
-Analyze current news and provide a structured probability assessment of a US military strike against Iran.
-
-Return a JSON object with EXACTLY this structure (no markdown, no explanation, ONLY the JSON):
-
+Return a JSON object with EXACTLY this structure (no markdown, ONLY JSON):
 {
   "probability_30d": <integer 0-100>,
   "probability_90d": <integer 0-100>,
   "confidence": <integer 0-100>,
   "threat_level": "<LOW|MODERATE|ELEVATED|HIGH|CRITICAL>",
   "key_driver": "<most important factor, max 100 chars>",
-  "analyst_summary": "<2-3 paragraph summary grounded in recent events>",
-  "escalatory_factors": ["<factor>", "<factor>", "<factor>", "<factor>"],
-  "de_escalatory_factors": ["<factor>", "<factor>", "<factor>"],
-  "contextual_factors": ["<factor>", "<factor>", "<factor>"],
-  "signals": [
-    { "outlet": "<n>", "headline": "<text>", "sentiment": "<escalatory|neutral|de-escalatory>", "time_ago": "<e.g. 2 days ago>" }
-  ],
-  "timeline": [
-    { "date": "<e.g. Feb 2025>", "event": "<description max 80 chars>" }
-  ]
+  "analyst_summary": "<2-3 paragraph summary>",
+  "escalatory_factors": ["<factor>","<factor>","<factor>","<factor>"],
+  "de_escalatory_factors": ["<factor>","<factor>","<factor>"],
+  "contextual_factors": ["<factor>","<factor>","<factor>"],
+  "signals": [{"outlet":"<n>","headline":"<text>","sentiment":"<escalatory|neutral|de-escalatory>","time_ago":"<e.g. 2 days ago>"}],
+  "timeline": [{"date":"<e.g. Feb 2025>","event":"<description max 80 chars>"}]
 }
+Baseline 30-day strike probability absent major provocation is 5-15%."""
 
-Be calibrated. Baseline 30-day strike probability absent major provocation is 5-15%.
-Ground everything in your web search results."""
+USER_MESSAGE = """Search for latest news (past 2-4 weeks) on US-Iran relations, Iran nuclear program, US military posture in Middle East, Iran proxy activity, and any threats or diplomatic developments. Return full structured JSON assessment."""
 
-USER_MESSAGE = """Search for the latest news (past 2-4 weeks) about:
-1. US-Iran diplomatic relations and any negotiations
-2. Iran nuclear program — enrichment levels, IAEA reports
-3. US military posture in the Middle East (carrier groups, troop movements)
-4. Iran-linked proxy activity: Houthis, Hezbollah, Iraq militias
-5. Israeli military operations that could pull in the US
-6. US or Israeli threats / ultimatums regarding Iran
-7. Iranian retaliatory threats or actions
-8. Any back-channel talks or diplomatic off-ramps
+def get_api_key():
+    """Try every possible way to get the API key."""
+    # Method 1: standard
+    key = os.environ.get("ANTHROPIC_API_KEY", "")
+    if key:
+        return key.strip().replace("\n", "").replace("\r", "").replace(" ", "")
+    
+    # Method 2: os.getenv
+    key = os.getenv("ANTHROPIC_API_KEY", "")
+    if key:
+        return key.strip().replace("\n", "").replace("\r", "").replace(" ", "")
+    
+    # Method 3: scan all env vars case-insensitively
+    for k, v in os.environ.items():
+        if k.upper() == "ANTHROPIC_API_KEY" and v:
+            return v.strip().replace("\n", "").replace("\r", "").replace(" ", "")
+    
+    return ""
 
-Then return your full structured JSON assessment."""
-
-# ── Core analysis function ─────────────────────────────────────────────────────
 def run_analysis():
     global cache
 
-    # Always read fresh from environment
-    api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip().replace("\n", "").replace("\r", "").replace(" ", "")
-
-    log.info(f"Checking API key — present: {bool(api_key)}, length: {len(api_key)}, prefix: {api_key[:14] if api_key else 'MISSING'}")
+    api_key = get_api_key()
+    log.info(f"API key check — length: {len(api_key)}, starts_with_sk: {api_key.startswith('sk-') if api_key else False}")
 
     if not api_key:
-        log.error("ANTHROPIC_API_KEY not set or empty!")
+        log.error("No API key found in environment!")
+        # Log all env var NAMES (not values) for debugging
+        env_keys = list(os.environ.keys())
+        log.info(f"Available env var names: {env_keys}")
         cache["status"] = "error"
-        cache["error"] = "ANTHROPIC_API_KEY environment variable is not set."
+        cache["error"] = f"ANTHROPIC_API_KEY not found. Available vars: {env_keys}"
         return
 
     log.info("Running analysis...")
-    cache["status"] = "pending"
+    cache["status"] = "running"
 
     try:
         client = anthropic.Anthropic(api_key=api_key)
-
         response = client.messages.create(
             model="claude-sonnet-4-20250514",
             max_tokens=4000,
@@ -101,39 +96,34 @@ def run_analysis():
 
         match = re.search(r"\{[\s\S]*\}", raw_text)
         if not match:
-            raise ValueError("No JSON found in Claude response")
+            raise ValueError("No JSON found in response")
 
         parsed = json.loads(match.group(0))
-
         now = datetime.now(timezone.utc)
-        next_run = datetime.fromtimestamp(
-            now.timestamp() + REFRESH_INTERVAL_HOURS * 3600, tz=timezone.utc
-        )
+        next_run = datetime.fromtimestamp(now.timestamp() + REFRESH_INTERVAL_HOURS * 3600, tz=timezone.utc)
 
-        cache["data"] = parsed
-        cache["last_updated"] = now.isoformat()
-        cache["next_update"] = next_run.isoformat()
-        cache["status"] = "ok"
-        cache["error"] = None
-
-        log.info(f"Analysis complete. 30d: {parsed.get('probability_30d')}% | Threat: {parsed.get('threat_level')}")
+        cache.update({
+            "data": parsed,
+            "last_updated": now.isoformat(),
+            "next_update": next_run.isoformat(),
+            "status": "ok",
+            "error": None,
+        })
+        log.info(f"Done! 30d: {parsed.get('probability_30d')}% | {parsed.get('threat_level')}")
 
     except Exception as e:
         log.error(f"Analysis failed: {e}")
         cache["status"] = "error"
         cache["error"] = str(e)
 
-# ── Background scheduler ───────────────────────────────────────────────────────
 def scheduler_loop():
     run_analysis()
     while True:
         time.sleep(REFRESH_INTERVAL_HOURS * 3600)
         run_analysis()
 
-scheduler_thread = threading.Thread(target=scheduler_loop, daemon=True)
-scheduler_thread.start()
+threading.Thread(target=scheduler_loop, daemon=True).start()
 
-# ── Routes ─────────────────────────────────────────────────────────────────────
 @app.route("/api/assessment")
 def assessment():
     return jsonify({
@@ -146,19 +136,20 @@ def assessment():
 
 @app.route("/api/health")
 def health():
-    api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip().replace("\n", "").replace("\r", "").replace(" ", "")
+    api_key = get_api_key()
     return jsonify({
         "ok": True,
         "status": cache["status"],
         "api_key_set": bool(api_key),
         "api_key_length": len(api_key),
+        "api_key_valid_format": api_key.startswith("sk-ant-") if api_key else False,
+        "all_env_var_names": list(os.environ.keys()),
     })
 
 @app.route("/")
 def index():
-    return jsonify({"message": "Iran Monitor API", "endpoints": ["/api/assessment", "/api/health"]})
+    return jsonify({"message": "Iran Monitor API"})
 
-# ── Run ────────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
