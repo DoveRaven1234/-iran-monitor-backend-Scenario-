@@ -1,3 +1,4 @@
+
 import os
 import json
 import time
@@ -71,7 +72,7 @@ def run_analysis():
     global cache
 
     # Always read fresh from environment
-    api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip().replace("\n", "").replace("\r", "").replace(" ", "")
 
     log.info(f"Checking API key — present: {bool(api_key)}, length: {len(api_key)}, prefix: {api_key[:14] if api_key else 'MISSING'}")
 
@@ -145,7 +146,7 @@ def assessment():
 
 @app.route("/api/health")
 def health():
-    api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip().replace("\n", "").replace("\r", "").replace(" ", "")
     return jsonify({
         "ok": True,
         "status": cache["status"],
