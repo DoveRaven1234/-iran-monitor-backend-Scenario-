@@ -3,6 +3,7 @@ import json
 import time
 import logging
 import threading
+import re
 from datetime import datetime, timezone
 import anthropic
 from flask import Flask, jsonify
@@ -13,17 +14,16 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 log = logging.getLogger(__name__)
 
 app = Flask(__name__)
-CORS(app)  # allow any frontend to call this API
+CORS(app)
 
-ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 REFRESH_INTERVAL_HOURS = int(os.environ.get("REFRESH_INTERVAL_HOURS", "4"))
 
 # ── In-memory cache ────────────────────────────────────────────────────────────
 cache = {
-    "data": None,          # the parsed JSON assessment
-    "last_updated": None,  # ISO timestamp string
-    "next_update": None,   # ISO timestamp string
-    "status": "pending",   # pending | ok | error
+    "data": None,
+    "last_updated": None,
+    "next_update": None,
+    "status": "pending",
     "error": None,
 }
 
@@ -44,7 +44,7 @@ Return a JSON object with EXACTLY this structure (no markdown, no explanation, O
   "de_escalatory_factors": ["<factor>", "<factor>", "<factor>"],
   "contextual_factors": ["<factor>", "<factor>", "<factor>"],
   "signals": [
-    { "outlet": "<name>", "headline": "<text>", "sentiment": "<escalatory|neutral|de-escalatory>", "time_ago": "<e.g. 2 days ago>" }
+    { "outlet": "<n>", "headline": "<text>", "sentiment": "<escalatory|neutral|de-escalatory>", "time_ago": "<e.g. 2 days ago>" }
   ],
   "timeline": [
     { "date": "<e.g. Feb 2025>", "event": "<description max 80 chars>" }
@@ -70,8 +70,13 @@ Then return your full structured JSON assessment."""
 def run_analysis():
     global cache
 
-    if not ANTHROPIC_API_KEY:
-        log.error("ANTHROPIC_API_KEY not set!")
+    # Always read fresh from environment
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+
+    log.info(f"Checking API key — present: {bool(api_key)}, length: {len(api_key)}, prefix: {api_key[:14] if api_key else 'MISSING'}")
+
+    if not api_key:
+        log.error("ANTHROPIC_API_KEY not set or empty!")
         cache["status"] = "error"
         cache["error"] = "ANTHROPIC_API_KEY environment variable is not set."
         return
@@ -80,7 +85,7 @@ def run_analysis():
     cache["status"] = "pending"
 
     try:
-        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+        client = anthropic.Anthropic(api_key=api_key)
 
         response = client.messages.create(
             model="claude-sonnet-4-20250514",
@@ -90,12 +95,9 @@ def run_analysis():
             messages=[{"role": "user", "content": USER_MESSAGE}]
         )
 
-        # Extract text from response
         text_blocks = [b.text for b in response.content if hasattr(b, "text")]
         raw_text = "\n".join(text_blocks)
 
-        # Parse JSON
-        import re
         match = re.search(r"\{[\s\S]*\}", raw_text)
         if not match:
             raise ValueError("No JSON found in Claude response")
@@ -113,7 +115,7 @@ def run_analysis():
         cache["status"] = "ok"
         cache["error"] = None
 
-        log.info(f"Analysis complete. Probability 30d: {parsed.get('probability_30d')}% | Threat: {parsed.get('threat_level')}")
+        log.info(f"Analysis complete. 30d: {parsed.get('probability_30d')}% | Threat: {parsed.get('threat_level')}")
 
     except Exception as e:
         log.error(f"Analysis failed: {e}")
@@ -122,13 +124,11 @@ def run_analysis():
 
 # ── Background scheduler ───────────────────────────────────────────────────────
 def scheduler_loop():
-    """Run analysis immediately on start, then every N hours."""
     run_analysis()
     while True:
         time.sleep(REFRESH_INTERVAL_HOURS * 3600)
         run_analysis()
 
-# Start background thread
 scheduler_thread = threading.Thread(target=scheduler_loop, daemon=True)
 scheduler_thread.start()
 
@@ -145,7 +145,13 @@ def assessment():
 
 @app.route("/api/health")
 def health():
-    return jsonify({"ok": True, "status": cache["status"]})
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+    return jsonify({
+        "ok": True,
+        "status": cache["status"],
+        "api_key_set": bool(api_key),
+        "api_key_length": len(api_key),
+    })
 
 @app.route("/")
 def index():
